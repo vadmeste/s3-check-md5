@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/md5"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -18,6 +20,18 @@ var (
 	endpoint, accessKey, secretKey string
 	bucket, prefix                 string
 )
+
+// getMD5Sum returns MD5 sum of given data.
+func getMD5Sum(data []byte) []byte {
+	hash := md5.New()
+	hash.Write(data)
+	return hash.Sum(nil)
+}
+
+// getMD5Hash returns MD5 hash in hex encoding of given data.
+func getMD5Hash(data []byte) string {
+	return hex.EncodeToString(getMD5Sum(data))
+}
 
 func main() {
 
@@ -88,23 +102,57 @@ func main() {
 			if object.IsDeleteMarker {
 				continue
 			}
-			if strings.Contains(object.ETag, "-") {
-				log.Println("IGNORING", bucket, object.Key, object.VersionID, "with etag =", object.ETag)
-				continue
+			parts := 1
+			s := strings.Split(object.ETag, "-")
+			if len(s) > 1 {
+				if p, err := strconv.Atoi(s[1]); err == nil {
+					parts = p
+				} else {
+					fmt.Println("ETAG: wrong format:", err)
+					continue
+				}
 			}
-			obj, err := s3Client.GetObject(context.Background(), bucket, object.Key,
-				minio.GetObjectOptions{VersionID: object.VersionID})
-			if err != nil {
-				log.Println("GET", bucket, object.Key, object.VersionID, "=>", err)
-				continue
+
+			var partsMD5Sum [][]byte
+
+			for p := 1; p <= parts; p++ {
+				obj, err := s3Client.GetObject(context.Background(), bucket, object.Key,
+					minio.GetObjectOptions{VersionID: object.VersionID, PartNumber: p})
+				if err != nil {
+					log.Println("GET", bucket, object.Key, object.VersionID, "=>", err)
+					continue
+				}
+				h := md5.New()
+				if _, err := io.Copy(h, obj); err != nil {
+					log.Println("MD5 calculation error:", bucket, object.Key, object.VersionID, "=>", err)
+					continue
+				}
+				partsMD5Sum = append(partsMD5Sum, h.Sum(nil))
 			}
-			h := md5.New()
-			if _, err := io.Copy(h, obj); err != nil {
-				log.Println("MD5 calculation error:", bucket, object.Key, object.VersionID, "=>", err)
-				continue
+
+			corrupted := false
+
+			switch len(partsMD5Sum) {
+			case 0:
+				panic("etags list is empty")
+			case 1:
+				md5sum := fmt.Sprintf("%x", partsMD5Sum[0])
+				if md5sum != object.ETag {
+					corrupted = true
+				}
+			default:
+				var totalMD5SumBytes []byte
+				for _, sum := range partsMD5Sum {
+					totalMD5SumBytes = append(totalMD5SumBytes, sum...)
+				}
+				s3MD5 := fmt.Sprintf("%s-%d", getMD5Hash(totalMD5SumBytes), len(partsMD5Sum))
+				fmt.Println(s3MD5, "vs", object.ETag)
+				if s3MD5 != object.ETag {
+					corrupted = true
+				}
 			}
-			md5sum := fmt.Sprintf("%x", h.Sum(nil))
-			if md5sum != object.ETag {
+
+			if corrupted {
 				fmt.Println("CORRUPTED object:", bucket, object.Key, object.VersionID)
 			} else {
 				fmt.Println("INTACT", bucket, object.Key, object.VersionID)

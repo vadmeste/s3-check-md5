@@ -2,7 +2,7 @@ module github.com/vadmeste/s3-check-md5
 
 go 1.17
 
-require github.com/minio/minio-go/v7 v7.0.15
+require github.com/minio/minio-go/v7 v7.0.17-0.20211126102032-e55f8d731cb4
 
 require (
 	github.com/dustin/go-humanize v1.0.0 // indirect
